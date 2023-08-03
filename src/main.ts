@@ -2,7 +2,7 @@ import WebGLContext from "./webgl.ts";
 import loadImage from "./util/loadImage.ts";
 
 import vertex from './vertex.glsl';
-import fragment from './fragment.glsl';
+import fragment from './depth_map.glsl';
 import img0 from './assets/scene-2.jpg';
 
 const canvasWidth = 500;
