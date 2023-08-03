@@ -13,9 +13,9 @@ uniform sampler2D u_image;
 #define NOISE_STRENGTH 0.1
 #define BORDER_THRESHOLD 3.0
 
-#define MAX_DISPLACEMENT 32
-#define BLOCK_SIZE_PX 7
-#define BLOCK_DISPLACEMENT_QUANTUM_PX 3
+#define MAX_DISPLACEMENT 15
+#define BLOCK_SIZE_PX 3
+#define BLOCK_DISPLACEMENT_QUANTUM_PX 1
 #define MAX_DEPT_MM 3000.
 
 const vec3 ones = vec3(1., 1., 1.);
@@ -23,104 +23,103 @@ const int interBlockOffsetAmount = (BLOCK_SIZE_PX - 1) / 2;
 const float blockSizeSquared = float(BLOCK_SIZE_PX * BLOCK_SIZE_PX);
 const float infinity = 1e10;
 
-// Ridge kernel for edge detection
-const mat3 kernel = mat3(
-    -1.0, -1.0,  -1.0,
-    -1.0,  8.0, -1.0,
-    -1.0, -1.0,  -1.0
-);
+//// Calculates the dissimilarity between two blocks using the Sum of Squares
+//float computeBlockError(vec2 blockPositionA, vec2 blockPositionB) {
+//    float ss = 0.;
+//
+//    // Displacement of pixels within blocks
+//    for (int n = -interBlockOffsetAmount; n < interBlockOffsetAmount; n++)
+//    for (int m = -interBlockOffsetAmount; m < interBlockOffsetAmount; m++) {
+//        vec2 pixelDisplacement = vec2(float(n) / u_size.x, float(m) / u_size.y);
+//        vec2 pixelPositionA = blockPositionA + pixelDisplacement;
+//        vec2 pixelPositionB = blockPositionB + pixelDisplacement;
+//
+////                    if (pixelPositionB.x < 0.5 || pixelPositionB.x >= u_size.x ||
+////                        pixelPositionB.y < 0.0 || pixelPositionB.y >= u_size.y ||
+////                        pixelPositionA.x < 0.0 || pixelPositionA.x >= u_size.x / 2.0 ||
+////                        pixelPositionA.y < 0.0 || pixelPositionA.y >= u_size.y) continue;
+//
+//        vec3 pixelA = texture2D(u_image, pixelPositionA).rgb;
+//        vec3 pixelB = texture2D(u_image, pixelPositionB).rgb;
+//
+//        // Significant optimization potential:
+//        //   Grayscale needs not be calculated every time!
+//        ss += pow(dot(pixelB - pixelA, ones), 2.);
+//    }
+//
+//    return ss;
+//}
 
-float rand(vec2 co){
-    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453) - 1.;
-}
-
-float computeEdgeBrightness(vec2 texCoord) {
-    // TODO: Should be global but GLSL keeps bitching around
-    float texelSize = float(BORDER_THRESHOLD) / u_size.x;
-    vec3 edge = vec3(0.0);
-
-    for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) {
-        vec2 offset = vec2(float(i), float(j)) * texelSize;
-        vec4 neighbor = texture2D(u_image, texCoord + offset);
-        edge += neighbor.rgb * kernel[i + 1][j + 1];
-    }
-
-    return (edge.r + edge.g + edge.b) / 9.;
-}
-
-// Calculates the dissimilarity between two blocks using Mean Squared Error
+// Calculates the dissimilarity between two blocks using Normalized Cross-Correlation (NCC)
 float computeBlockError(vec2 blockPositionA, vec2 blockPositionB) {
-    float mse = 0.;
+    float meanA = 0.0;
+    float meanB = 0.0;
+    float stdDevA = 0.0;
+    float stdDevB = 0.0;
 
-    // Displacement of pixels within blocks
-    for (int n = -interBlockOffsetAmount; n < interBlockOffsetAmount; n++)
-    for (int m = -interBlockOffsetAmount; m < interBlockOffsetAmount; m++) {
-        vec2 pixelDisplacement = vec2(float(n) / u_size.x, float(m) / u_size.y);
-        vec2 pixelPositionA = blockPositionA + pixelDisplacement;
-        vec2 pixelPositionB = blockPositionB + pixelDisplacement;
+    // Compute mean values of the two blocks
+    for (int n = -interBlockOffsetAmount; n <= interBlockOffsetAmount; n++) {
+        for (int m = -interBlockOffsetAmount; m <= interBlockOffsetAmount; m++) {
+            vec2 pixelPositionA = blockPositionA + vec2(float(n) / u_size.x, float(m) / u_size.y);
+            vec2 pixelPositionB = blockPositionB + vec2(float(n) / u_size.x, float(m) / u_size.y);
 
-//                    if (pixelPositionB.x < 0.5 || pixelPositionB.x >= u_size.x ||
-//                        pixelPositionB.y < 0.0 || pixelPositionB.y >= u_size.y ||
-//                        pixelPositionA.x < 0.0 || pixelPositionA.x >= u_size.x / 2.0 ||
-//                        pixelPositionA.y < 0.0 || pixelPositionA.y >= u_size.y) continue;
+            vec3 pixelA = texture2D(u_image, pixelPositionA).rgb;
+            vec3 pixelB = texture2D(u_image, pixelPositionB).rgb;
 
-        vec3 pixelA = texture2D(u_image, pixelPositionA).rgb;
-        vec3 pixelB = texture2D(u_image, pixelPositionB).rbg;
-
-        // Significant optimization potential:
-        //   Grayscale needs not be calculated every time!
-        mse += pow(dot(pixelB - pixelA, ones), 2.);
-    }
-
-    return mse / blockSizeSquared;
-}
-
-/**
- * Returns a vector with the displacement in XY to closest block match between
- * the block at texCoordA and texCoordB.
- * This function thus represents a vector field the describes the optical flow between
- * two relating images.
- */
-vec2 computeXYDisplacement(vec2 texCoordA, vec2 texCoordB) {
-    float lowestFoundBlockError = infinity;
-    vec2 bestFoundMatch = vec2(0, 0);
-
-    for (int i = -MAX_DISPLACEMENT; i <= MAX_DISPLACEMENT; i += BLOCK_DISPLACEMENT_QUANTUM_PX)
-    for (int j = -MAX_DISPLACEMENT; j <= MAX_DISPLACEMENT; j += BLOCK_DISPLACEMENT_QUANTUM_PX) {
-        if (i == 0 && j == 0) continue;
-
-        vec2 blockDisplacement = vec2(float(i) / u_size.x, float(j) / u_size.y);
-        vec2 blockPositionA = texCoordA;
-        vec2 blockPositionB = texCoordB + blockDisplacement * float(BLOCK_SIZE_PX);
-
-        float blockError = computeBlockError(blockPositionA, blockPositionB);
-
-        // Update best match if new lowest block error found
-        if (blockError < lowestFoundBlockError) {
-            lowestFoundBlockError = blockError;
-            bestFoundMatch = blockDisplacement;
+            meanA += dot(pixelA, ones);
+            meanB += dot(pixelB, ones);
         }
     }
 
-    return bestFoundMatch / float(MAX_DISPLACEMENT);
+    meanA /= blockSizeSquared;
+    meanB /= blockSizeSquared;
+
+    // Compute standard deviations of the two blocks
+    for (int n = -interBlockOffsetAmount; n <= interBlockOffsetAmount; n++) {
+        for (int m = -interBlockOffsetAmount; m <= interBlockOffsetAmount; m++) {
+            vec2 pixelPositionA = blockPositionA + vec2(float(n) / u_size.x, float(m) / u_size.y);
+            vec2 pixelPositionB = blockPositionB + vec2(float(n) / u_size.x, float(m) / u_size.y);
+
+            vec3 pixelA = texture2D(u_image, pixelPositionA).rgb;
+            vec3 pixelB = texture2D(u_image, pixelPositionB).rgb;
+
+            stdDevA += pow(dot(pixelA, ones) - meanA, 2.0);
+            stdDevB += pow(dot(pixelB, ones) - meanB, 2.0);
+        }
+    }
+
+    stdDevA = sqrt(stdDevA / blockSizeSquared);
+    stdDevB = sqrt(stdDevB / blockSizeSquared);
+
+    // Compute the normalized cross-correlation
+    float ncc = 0.0;
+    for (int n = -interBlockOffsetAmount; n <= interBlockOffsetAmount; n++) {
+        for (int m = -interBlockOffsetAmount; m <= interBlockOffsetAmount; m++) {
+            vec2 pixelPositionA = blockPositionA + vec2(float(n) / u_size.x, float(m) / u_size.y);
+            vec2 pixelPositionB = blockPositionB + vec2(float(n) / u_size.x, float(m) / u_size.y);
+
+            vec3 pixelA = texture2D(u_image, pixelPositionA).rgb;
+            vec3 pixelB = texture2D(u_image, pixelPositionB).rgb;
+
+            ncc += (dot(pixelA, ones) - meanA) * (dot(pixelB, ones) - meanB);
+        }
+    }
+
+    ncc /= (blockSizeSquared * stdDevA * stdDevB);
+
+    return 1.0 - ncc; // We want to minimize dissimilarity (1 - NCC).
 }
 
-// Similar to computeXYDisplacement() but only along X-axis
+// Computes pixel displacement along x-Axis using block neighbor similarity
 float computeXDisplacement(vec2 texCoordA, vec2 texCoordB) {
     float lowestFoundBlockError = infinity;
     vec2 bestFoundMatch = vec2(0, 0);
 
-    // Displacement of blocks within texture
-    //   IMPORTANT for stereo vision: Only displace blocks along the x axis,
-    //   Any displacement along y is essentially noise.
-
-    for (int i = -MAX_DISPLACEMENT; i <= MAX_DISPLACEMENT; i += BLOCK_DISPLACEMENT_QUANTUM_PX) {
-        if (i == 0) continue;
-
-        vec2 blockDisplacement = vec2(float(i) / u_size.x, 0);
+    // TODO: Potential optimization possible by searching only from x=0 to x=MAX_DISPLACEMENT
+    for (int x = -MAX_DISPLACEMENT; x <= MAX_DISPLACEMENT; x += BLOCK_DISPLACEMENT_QUANTUM_PX) {
+        vec2 blockDisplacement = vec2(float(x) / u_size.x, 0);
         vec2 blockPositionA = texCoordA;
         vec2 blockPositionB = texCoordB + blockDisplacement * float(BLOCK_SIZE_PX);
-
         float blockError = computeBlockError(blockPositionA, blockPositionB);
 
         // Update best match if new lowest block error found
@@ -130,40 +129,38 @@ float computeXDisplacement(vec2 texCoordA, vec2 texCoordB) {
         }
     }
 
-    return bestFoundMatch.x / float(MAX_DISPLACEMENT);
+    return bestFoundMatch.x * (u_size.x);
 }
 
 float computeDepth(float disparity) {
-    const float baseLine = 120.;
+    const float baseLine = 100.;
     const float focalLength = 4.32;
-    return (baseLine * focalLength) / disparity;
-}
 
-vec3 edgeDetectionWithContrast(vec2 texCoord) {
-    vec4 raw_color = texture2D(u_image, texCoord);
+    // For determining the depth map, we are only interested in absolute values of disparity.
+    // Havin non-normalized values might however be uesful later on.
+    float absoluteDisparity = abs(disparity);
+    float depth = (baseLine * focalLength) / absoluteDisparity;
 
-    float edgeBrightness = computeEdgeBrightness(texCoord);
-    float r = raw_color.r / 2. + edgeBrightness * 3.;
-    float g = 0.;
-    float b = raw_color.b;
-
-    // Amplifies red/blues
-    if (r > b) b -= r;
-    else r -= b;
-
-    return vec3(r, g, b);
+    return depth;
 }
 
 void main() {
     vec2 texCoordA = vec2(v_texCoord.x / 2., v_texCoord.y);
     vec2 texCoordB = vec2(v_texCoord.x / 2. + 0.5, v_texCoord.y);
 
-//    vec3 highContrastEdges = edgeDetectionWithContrast(texCoordA);
-//    vec3 displacement = vec3(computeDisplacement(texCoordA, texCoordB) * 1000., 0.0);
     float disparity = computeXDisplacement(texCoordA, texCoordB);
     float depth = computeDepth(disparity);
-//    vec3 modified_color = (vec3(depth * .00001) + highContrastEdges * 0.3) / 3.;
-    vec3 modified_color = vec3(depth * 0.001);
 
-    gl_FragColor = vec4(modified_color, 1.);
+    // Estimate the depth range based on the disparity values obtained in the scene.
+    // You can manually adjust these values based on your observations.
+    const float minDepth = 0.0; // Estimated minimum depth
+    const float maxDepth = 100.0; // Estimated maximum depth
+
+    // Clamp the depth value to the specified range (minDepth to maxDepth)
+    depth = clamp(depth, minDepth, maxDepth);
+
+    // Normalize the depth value to a 0 to 1 range for visualization
+    depth = (depth - minDepth) / (maxDepth - minDepth);
+
+    gl_FragColor = vec4(vec3(1.0 - depth), 1.);
 }
